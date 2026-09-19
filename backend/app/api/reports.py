@@ -1,5 +1,8 @@
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+import csv
+import io
 
 from app.database.connection import get_db
 from app.models.report import WeatherReport
@@ -80,6 +83,13 @@ def create_report(
     report: dict,
     db: Session = Depends(get_db),
 ):
+    trust_score = float(report.get("trust_score", 0.0))
+    confidence_score = float(report.get("confidence_score", 0.0))
+
+    if report.get("source") == "WeatherNova User":
+        trust_score = max(trust_score, 0.45)
+        confidence_score = max(confidence_score, 0.55)
+
     new_report = WeatherReport(
         source=report.get(
             "source",
@@ -121,12 +131,12 @@ def create_report(
 
         confidence_score=report.get(
             "confidence_score",
-            0.0,
+            confidence_score,
         ),
 
         trust_score=report.get(
             "trust_score",
-            0.0,
+            trust_score,
         ),
 
         is_duplicate=report.get(
@@ -145,3 +155,73 @@ def create_report(
         "id": new_report.id,
         "message": "Weather report created successfully.",
     }
+
+
+@router.get("/export")
+def export_reports(
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(WeatherReport)
+
+    if event_type:
+        query = query.filter(WeatherReport.event_type == event_type)
+
+    if state:
+        query = query.filter(WeatherReport.state == state)
+
+    if verification_status:
+        query = query.filter(
+            WeatherReport.verification_status == verification_status
+        )
+
+    reports = query.order_by(WeatherReport.timestamp.desc()).all()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "id",
+            "source",
+            "event_type",
+            "city",
+            "state",
+            "latitude",
+            "longitude",
+            "verification_status",
+            "confidence_score",
+            "trust_score",
+            "is_duplicate",
+            "timestamp",
+            "description",
+        ]
+    )
+
+    for report in reports:
+        writer.writerow(
+            [
+                report.id,
+                report.source,
+                report.event_type,
+                report.city,
+                report.state,
+                report.latitude,
+                report.longitude,
+                report.verification_status,
+                report.confidence_score,
+                report.trust_score,
+                report.is_duplicate,
+                report.timestamp.isoformat() if report.timestamp else "",
+                report.description,
+            ]
+        )
+
+    buffer.seek(0)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=weathernova-reports.csv"
+        },
+    )

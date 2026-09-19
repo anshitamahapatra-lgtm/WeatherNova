@@ -2,9 +2,11 @@ import os
 
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:Anshita%402004@localhost:5432/weathernova",
+    "DATABASE_URL"
 )
+
+if not DATABASE_URL:
+    DATABASE_URL = "sqlite:///./weathernova_local.db"
 
 SQL_ECHO = os.getenv(
     "SQL_ECHO",

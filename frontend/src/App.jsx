@@ -1,1777 +1,908 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
-import AnalyticsCards from "./components/AnalyticsCards";
-import EventChart from "./components/EventChart";
-import EventsList from "./components/EventsList";
 import ForecastChart from "./components/ForecastChart";
 import HourlyWeather from "./components/HourlyWeather";
-import SeverityChart from "./components/SeverityChart";
-import StateChart from "./components/StateChart";
 
 import "./App.css";
 
-
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
-  "http://127.0.0.1:8000";
+  (window.location.hostname === "localhost" ||
+  window.location.hostname === "127.0.0.1"
+    ? "http://127.0.0.1:8000"
+    : window.location.origin);
 
+const routes = [
+  ["/dashboard", "Dashboard"],
+  ["/weather", "Live Weather"],
+  ["/map", "Map"],
+  ["/history", "History"],
+  ["/reports", "Reports"],
+  ["/analytics", "Analytics"],
+  ["/alerts", "Alerts"],
+  ["/report", "Citizen Report"],
+  ["/admin/login", "Admin Login"],
+  ["/admin/dashboard", "Admin"],
+  ["/admin/reports", "Review"],
+  ["/admin/events", "Events"],
+  ["/admin/sources", "Sources"],
+  ["/admin/audit", "Audit"],
+];
 
-function App() {
-  const [city, setCity] =
-    useState("");
+function currentPath() {
+  return window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+}
 
-  const [weather, setWeather] =
-    useState(null);
+function navigate(path) {
+  window.history.pushState({}, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
 
-  const [analytics, setAnalytics] =
-    useState(null);
+async function request(endpoint, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
 
-  const [reports, setReports] =
-    useState([]);
+  if (!response.ok) {
+    let message = `Request failed with ${response.status}`;
 
-  const [events, setEvents] =
-    useState([]);
-
-  const [loading, setLoading] =
-    useState(false);
-
-  const [refreshing, setRefreshing] =
-    useState(false);
-
-  const [locating, setLocating] =
-    useState(false);
-
-  const [error, setError] =
-    useState("");
-
-  const [searchHistory, setSearchHistory] =
-    useState([]);
-
-  const [lastUpdated, setLastUpdated] =
-    useState(null);
-
-  const [reportForm, setReportForm] =
-    useState({
-      city: "",
-      state: "",
-      event_type: "Clear/Cloudy",
-      description: "",
-    });
-
-  const [reportSubmitting, setReportSubmitting] =
-    useState(false);
-
-  const [reportMessage, setReportMessage] =
-    useState("");
-
-
-  const loadAnalytics = useCallback(async () => {
-    const response =
-      await fetch(
-        `${API_BASE_URL}/analytics/summary`
-      );
-
-    if (!response.ok) {
-      throw new Error(
-        "Unable to load analytics."
-      );
+    try {
+      const data = await response.json();
+      message = data.detail || message;
+    } catch {
+      // Keep default message.
     }
 
-    const data =
-      await response.json();
+    throw new Error(message);
+  }
 
-    setAnalytics(data);
-  }, []);
+  return response.json();
+}
 
+function authHeaders() {
+  const token = localStorage.getItem("weathernova_admin_token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
-  const loadReports = useCallback(async () => {
-    const response =
-      await fetch(
-        `${API_BASE_URL}/reports/`
-      );
+function StatusPill({ children, tone = "info" }) {
+  return <span className={`status-pill status-${tone}`}>{children}</span>;
+}
 
-    if (!response.ok) {
-      throw new Error(
-        "Unable to load reports."
-      );
+function Metric({ label, value, note }) {
+  return (
+    <div className="analytics-card">
+      <span className="analytics-card-label">{label}</span>
+      <span className="analytics-card-value">{value ?? 0}</span>
+      <span className="analytics-card-description">{note}</span>
+    </div>
+  );
+}
+
+function PageHeader({ eyebrow, title, description }) {
+  return (
+    <section className="page-header">
+      <span className="section-eyebrow">{eyebrow}</span>
+      <h1>{title}</h1>
+      <p>{description}</p>
+    </section>
+  );
+}
+
+function DataTable({ columns, rows, empty = "No data available." }) {
+  return (
+    <div className="table-wrapper">
+      <table className="reports-table">
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column.key}>{column.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} style={{ textAlign: "center" }}>
+                {empty}
+              </td>
+            </tr>
+          ) : (
+            rows.map((row) => (
+              <tr key={row.id || JSON.stringify(row)}>
+                {columns.map((column) => (
+                  <td key={column.key}>
+                    {column.render ? column.render(row) : row[column.key]}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function useCoreData() {
+  const [analytics, setAnalytics] = useState(null);
+  const [reports, setReports] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [sources, setSources] = useState([]);
+  const [alerts, setAlerts] = useState({ active_alerts: [], verified_signals: [] });
+  const [pipeline, setPipeline] = useState(null);
+  const [error, setError] = useState("");
+
+  const reload = useCallback(async () => {
+    setError("");
+
+    try {
+      const [summary, reportRows, eventRows, sourceRows, alertRows, pipelineStatus] =
+        await Promise.all([
+          request("/analytics/summary"),
+          request("/reports/?limit=100"),
+          request("/events/"),
+          request("/sources/"),
+          request("/alerts/"),
+          request("/big-data/pipeline"),
+        ]);
+
+      setAnalytics(summary);
+      setReports(reportRows);
+      setEvents(eventRows);
+      setSources(sourceRows);
+      setAlerts(alertRows);
+      setPipeline(pipelineStatus);
+    } catch (err) {
+      setError(err.message || "Unable to load WeatherNova data.");
     }
-
-    const data =
-      await response.json();
-
-    setReports(data);
   }, []);
 
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
-  const loadEvents = useCallback(async () => {
-    const response =
-      await fetch(
-        `${API_BASE_URL}/events/`
-      );
+  return { analytics, reports, events, sources, alerts, pipeline, error, reload };
+}
 
-    if (!response.ok) {
-      throw new Error(
-        "Unable to load events."
-      );
-    }
+function Dashboard({ data }) {
+  const { analytics, reports, events, sources, alerts, pipeline, error } = data;
 
-    const data =
-      await response.json();
+  return (
+    <>
+      <PageHeader
+        eyebrow="SIH26069 Control Room"
+        title="WeatherNova Dashboard"
+        description="Verified weather intelligence, citizen signals, source health, and operational analytics."
+      />
+      {error && <div className="error-message">{error}</div>}
+      <div className="analytics-cards">
+        <Metric label="Reports" value={analytics?.total_reports} note="Collected weather signals" />
+        <Metric label="Verified" value={analytics?.verified_reports} note="Confirmed reports" />
+        <Metric label="Duplicates" value={analytics?.duplicate_reports} note="Repeated signals" />
+        <Metric label="Alerts" value={alerts.active_alerts.length} note="Active event warnings" />
+      </div>
+      <section className="dashboard-grid">
+        <div className="reports-section">
+          <div className="reports-header">
+            <h2>Operational Coverage</h2>
+            <p>Collection and analysis components exposed by the platform.</p>
+          </div>
+          <div className="coverage-grid">
+            {Object.entries(pipeline?.ingestion || {}).map(([name, status]) => (
+              <div className="coverage-item" key={name}>
+                <span>{name.replaceAll("_", " ")}</span>
+                <StatusPill tone={status === "implemented" ? "success" : "warn"}>
+                  {status}
+                </StatusPill>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="reports-section">
+          <div className="reports-header">
+            <h2>Source Reliability</h2>
+            <p>Configured source classes and reliability scores.</p>
+          </div>
+          <div className="source-list">
+            {sources.map((source) => (
+              <div className="source-row" key={source.id}>
+                <div>
+                  <strong>{source.name}</strong>
+                  <span>{source.source_type}</span>
+                </div>
+                <StatusPill tone={source.is_active ? "success" : "warn"}>
+                  {Math.round(source.reliability_score * 100)}%
+                </StatusPill>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+      <section className="reports-section">
+        <div className="reports-header">
+          <h2>Latest Intelligence</h2>
+          <p>Recent reports used by WeatherNova.</p>
+        </div>
+        <DataTable
+          rows={reports.slice(0, 8)}
+          columns={[
+            { key: "source", label: "Source" },
+            { key: "event_type", label: "Event" },
+            { key: "city", label: "City" },
+            { key: "state", label: "State" },
+            {
+              key: "verification_status",
+              label: "Status",
+              render: (row) => <StatusPill>{row.verification_status}</StatusPill>,
+            },
+            { key: "trust_score", label: "Trust" },
+          ]}
+        />
+      </section>
+      <EventsPanel events={events} />
+    </>
+  );
+}
 
-    setEvents(data);
-  }, []);
+function WeatherPage({ reload }) {
+  const [city, setCity] = useState("");
+  const [weather, setWeather] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [error, setError] = useState("");
+  const [history, setHistory] = useState([]);
 
+  async function searchWeather(cityName) {
+    const trimmed = cityName.trim();
 
-  const searchWeather = useCallback(async (cityName) => {
-    const trimmedCity =
-      cityName.trim();
-
-    if (!trimmedCity) {
-      setError(
-        "Please enter a city name."
-      );
-
+    if (!trimmed) {
+      setError("Please enter a city name.");
       return;
     }
 
     setLoading(true);
     setError("");
-    setWeather(null);
 
     try {
-      const response =
-        await fetch(
-          `${API_BASE_URL}/weather/?city=${encodeURIComponent(
-            trimmedCity
-          )}`
-        );
-
-      if (!response.ok) {
-        let message =
-          "Unable to fetch weather data.";
-
-        try {
-          const errorData =
-            await response.json();
-
-          if (errorData.detail) {
-            message =
-              errorData.detail;
-          }
-        } catch {
-          // Keep default error message.
-        }
-
-        throw new Error(message);
-      }
-
-      const data =
-        await response.json();
-
+      const data = await request(`/weather/?city=${encodeURIComponent(trimmed)}`);
       setWeather(data);
-
       setCity(data.city);
-
-      setLastUpdated(
-        new Date()
-      );
-
-      setSearchHistory(
-        (previousHistory) => {
-          const existingCities =
-            previousHistory.filter(
-              (item) =>
-                item.toLowerCase() !==
-                data.city.toLowerCase()
-            );
-
-          return [
-            data.city,
-            ...existingCities,
-          ].slice(0, 6);
-        }
-      );
-
-      setReportForm(
-        (previousForm) => ({
-          ...previousForm,
-          city: data.city || previousForm.city,
-          state: data.state || previousForm.state,
-          event_type:
-            data.event_type ||
-            previousForm.event_type,
-        })
-      );
-
-      await Promise.all([
-        loadAnalytics(),
-        loadReports(),
-        loadEvents(),
-      ]);
+      setHistory((items) => [data.city, ...items.filter((item) => item !== data.city)].slice(0, 8));
+      await reload();
     } catch (err) {
-      console.error(
-        "Weather search error:",
-        err
-      );
-
-      setError(
-        err.message ||
-          "Something went wrong while fetching weather."
-      );
+      setError(err.message || "Unable to fetch weather.");
     } finally {
       setLoading(false);
     }
-  }, [
-    loadAnalytics,
-    loadEvents,
-    loadReports,
-  ]);
-
-
-  const refreshWeather = useCallback(async (
-    showLoading = false
-  ) => {
-    if (!city.trim()) {
-      return;
-    }
-
-    if (showLoading) {
-      setRefreshing(true);
-    }
-
-    setError("");
-
-    try {
-      const response =
-        await fetch(
-          `${API_BASE_URL}/weather/?city=${encodeURIComponent(
-            city.trim()
-          )}`
-        );
-
-      if (!response.ok) {
-        throw new Error(
-          "Unable to refresh weather data."
-        );
-      }
-
-      const data =
-        await response.json();
-
-      setWeather(data);
-
-      setCity(data.city);
-
-      setLastUpdated(
-        new Date()
-      );
-
-      setReportForm(
-        (previousForm) => ({
-          ...previousForm,
-          city: data.city || previousForm.city,
-          state: data.state || previousForm.state,
-          event_type:
-            data.event_type ||
-            previousForm.event_type,
-        })
-      );
-
-      await Promise.all([
-        loadAnalytics(),
-        loadReports(),
-        loadEvents(),
-      ]);
-    } catch (err) {
-      console.error(
-        "Weather refresh error:",
-        err
-      );
-
-      if (showLoading) {
-        setError(
-          err.message ||
-            "Unable to refresh weather data."
-        );
-      }
-    } finally {
-      if (showLoading) {
-        setRefreshing(false);
-      }
-    }
-  }, [
-    city,
-    loadAnalytics,
-    loadEvents,
-    loadReports,
-  ]);
-
-
-  async function handleManualRefresh() {
-    await refreshWeather(true);
   }
 
-
-  function handleUseMyLocation() {
+  function useLocation() {
     if (!navigator.geolocation) {
-      setError(
-        "Geolocation is not supported by your browser."
-      );
-
+      setError("Geolocation is not supported by your browser.");
       return;
     }
 
     setLocating(true);
-    setError("");
-
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const { latitude, longitude } =
-          position.coords;
-
         try {
-          const response =
-            await fetch(
-              `${API_BASE_URL}/weather/location?latitude=${encodeURIComponent(
-                latitude
-              )}&longitude=${encodeURIComponent(
-                longitude
-              )}`
-            );
-
-          if (!response.ok) {
-            let message =
-              "Unable to determine your city.";
-
-            try {
-              const errorData =
-                await response.json();
-
-              if (errorData.detail) {
-                message = errorData.detail;
-              }
-            } catch {
-              // Keep default error message.
-            }
-
-            throw new Error(message);
-          }
-
-          const locationData =
-            await response.json();
-
-          const rawDetectedCity =
-            locationData.city;
-
-          if (!rawDetectedCity) {
-            throw new Error(
-              "Unable to determine a city from your location."
-            );
-          }
-
-          const detectedCity =
-            rawDetectedCity
-              .replace(/\s+(rural|urban)$/i, "")
-              .trim();
-
-          setCity(detectedCity);
-
-          await searchWeather(
-            detectedCity
+          const { latitude, longitude } = position.coords;
+          const data = await request(
+            `/weather/location?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`
           );
+          await searchWeather(data.city);
         } catch (err) {
-          console.error(
-            "Location search error:",
-            err
-          );
-
-          setError(
-            err.message ||
-              "Unable to use your current location."
-          );
+          setError(err.message || "Unable to use your location.");
         } finally {
           setLocating(false);
         }
       },
-      (geoError) => {
-        console.error(
-          "Geolocation error:",
-          geoError
-        );
-
-        if (geoError.code === 1) {
-          setError(
-            "Location permission was denied. Please allow location access in your browser."
-          );
-        } else if (geoError.code === 2) {
-          setError(
-            "Your location could not be determined."
-          );
-        } else if (geoError.code === 3) {
-          setError(
-            "Location request timed out. Please try again."
-          );
-        } else {
-          setError(
-            "Unable to access your location."
-          );
-        }
-
+      () => {
+        setError("Location permission was denied or unavailable.");
         setLocating(false);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 300000,
       }
     );
   }
-
-
-  function handleSearch(event) {
-    event.preventDefault();
-
-    searchWeather(city);
-  }
-
-
-  async function handleHistorySearch(
-    historyCity
-  ) {
-    setCity(historyCity);
-
-    await searchWeather(
-      historyCity
-    );
-  }
-
-
-  function handleReportInputChange(event) {
-    const {
-      name,
-      value,
-    } = event.target;
-
-    setReportForm(
-      (previousForm) => ({
-        ...previousForm,
-        [name]: value,
-      })
-    );
-
-    setReportMessage("");
-  }
-
-
-  async function handleReportSubmit(event) {
-    event.preventDefault();
-
-    const trimmedCity =
-      reportForm.city.trim();
-
-    const trimmedState =
-      reportForm.state.trim();
-
-    const trimmedDescription =
-      reportForm.description.trim();
-
-    if (!trimmedCity) {
-      setReportMessage(
-        "Please enter the city."
-      );
-
-      return;
-    }
-
-    if (!trimmedState) {
-      setReportMessage(
-        "Please enter the state or region."
-      );
-
-      return;
-    }
-
-    if (!trimmedDescription) {
-      setReportMessage(
-        "Please describe the weather condition."
-      );
-
-      return;
-    }
-
-    setReportSubmitting(true);
-    setReportMessage("");
-    setError("");
-
-    try {
-      const response =
-        await fetch(
-          `${API_BASE_URL}/reports/`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-            body: JSON.stringify({
-              source: "WeatherNova User",
-              description:
-                trimmedDescription,
-              event_type:
-                reportForm.event_type,
-              city: trimmedCity,
-              state: trimmedState,
-              latitude:
-                weather?.latitude ?? null,
-              longitude:
-                weather?.longitude ?? null,
-              verification_status:
-                "pending",
-              confidence_score: 0.0,
-              trust_score: 0.0,
-              is_duplicate: false,
-            }),
-          }
-        );
-
-      if (!response.ok) {
-        let message =
-          "Unable to submit weather report.";
-
-        try {
-          const errorData =
-            await response.json();
-
-          if (errorData.detail) {
-            if (Array.isArray(errorData.detail)) {
-              message =
-                errorData.detail
-                  .map(
-                    (item) =>
-                      item.msg
-                  )
-                  .join(", ");
-            } else {
-              message =
-                errorData.detail;
-            }
-          }
-        } catch {
-          // Keep default message.
-        }
-
-        throw new Error(message);
-      }
-
-      await response.json();
-
-      setReportMessage(
-        "Weather report submitted successfully."
-      );
-
-      setReportForm(
-        (previousForm) => ({
-          ...previousForm,
-          description: "",
-        })
-      );
-
-      await Promise.all([
-        loadAnalytics(),
-        loadReports(),
-        loadEvents(),
-      ]);
-    } catch (err) {
-      console.error(
-        "Report submission error:",
-        err
-      );
-
-      setReportMessage(
-        err.message ||
-          "Unable to submit weather report."
-      );
-    } finally {
-      setReportSubmitting(false);
-    }
-  }
-
-
-  useEffect(() => {
-    let isMounted = true;
-
-    async function loadInitialData() {
-      setError("");
-
-      try {
-        const [
-          analyticsData,
-          reportsData,
-          eventsData,
-        ] = await Promise.all([
-          fetch(
-            `${API_BASE_URL}/analytics/summary`
-          ).then((response) => {
-            if (!response.ok) {
-              throw new Error(
-                "Unable to load analytics."
-              );
-            }
-
-            return response.json();
-          }),
-          fetch(
-            `${API_BASE_URL}/reports/`
-          ).then((response) => {
-            if (!response.ok) {
-              throw new Error(
-                "Unable to load reports."
-              );
-            }
-
-            return response.json();
-          }),
-          fetch(
-            `${API_BASE_URL}/events/`
-          ).then((response) => {
-            if (!response.ok) {
-              throw new Error(
-                "Unable to load events."
-              );
-            }
-
-            return response.json();
-          }),
-        ]);
-
-        if (!isMounted) {
-          return;
-        }
-
-        setAnalytics(analyticsData);
-        setReports(reportsData);
-        setEvents(eventsData);
-      } catch (err) {
-        console.error(
-          "Initial dashboard load error:",
-          err
-        );
-
-        if (isMounted) {
-          setError(
-            err.message ||
-              "Unable to load dashboard data."
-          );
-        }
-      }
-    }
-
-    loadInitialData();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-
-  useEffect(() => {
-    if (!city.trim() || !weather) {
-      return undefined;
-    }
-
-    const refreshInterval =
-      setInterval(
-        () => {
-          refreshWeather();
-        },
-        10 * 60 * 1000
-      );
-
-    return () => {
-      clearInterval(
-        refreshInterval
-      );
-    };
-  }, [city, weather, refreshWeather]);
-
-
-  function formatLastUpdated() {
-    if (!lastUpdated) {
-      return "Waiting for search";
-    }
-
-    return lastUpdated.toLocaleTimeString(
-      undefined,
-      {
-        hour: "2-digit",
-        minute: "2-digit",
-      }
-    );
-  }
-
 
   return (
-    <div className="app">
-
-      <div className="app-container">
-
-        <header className="topbar">
-
-          <div className="brand">
-
-            <div className="brand-mark">
-              🌩️
-            </div>
-
-            <div className="brand-text">
-
-              <span className="brand-name">
-                WeatherNova
-              </span>
-
-              <span className="brand-subtitle">
-                Weather Intelligence
-              </span>
-
-            </div>
-
-          </div>
-
-
-          <div className="system-status">
-
-            <span className="status-dot" />
-
-            API Connected
-
-          </div>
-
-        </header>
-
-
-        <main>
-
-          <section className="hero">
-
-            <div className="hero-content">
-
-              <span className="hero-eyebrow">
-                Real-Time Weather Intelligence
-              </span>
-
-              <h1>
-                Understand the weather.
-                <br />
-                Before it changes.
-              </h1>
-
-              <p className="hero-description">
-                WeatherNova combines live weather
-                conditions, forecasts, risk analysis,
-                events, and verified reports into one
-                intelligence dashboard.
-              </p>
-
-            </div>
-
-          </section>
-
-
-          <section className="search-section">
-
-            <form
-              className="search-form"
-              onSubmit={handleSearch}
-            >
-
-              <div className="search-input-wrapper">
-
-                <input
-                  className="search-input"
-                  type="text"
-                  value={city}
-                  onChange={(event) =>
-                    setCity(
-                      event.target.value
-                    )
-                  }
-                  placeholder="Search for a city..."
-                  disabled={
-                    loading ||
-                    refreshing
-                  }
-                />
-
-              </div>
-
-
-              <button
-                className="search-button"
-                type="submit"
-                disabled={
-                  loading ||
-                  refreshing ||
-                  locating
-                }
-              >
-
-                {loading
-                  ? "Loading..."
-                  : "Search Weather"}
-
-              </button>
-
-
-              <button
-                className="search-button"
-                type="button"
-                onClick={handleUseMyLocation}
-                disabled={
-                  loading ||
-                  refreshing ||
-                  locating
-                }
-              >
-
-                {locating
-                  ? "Locating..."
-                  : "📍 Use My Location"}
-
-              </button>
-
-            </form>
-
-
-            {searchHistory.length > 0 && (
-
-              <div className="search-history">
-
-                <span>
-                  Recent searches
-                </span>
-
-                <div className="history-list">
-
-                  {searchHistory.map(
-                    (historyCity) => (
-
-                      <button
-                        type="button"
-                        className="history-chip"
-                        key={historyCity}
-                        onClick={() =>
-                          handleHistorySearch(
-                            historyCity
-                          )
-                        }
-                        disabled={
-                          loading ||
-                          refreshing
-                        }
-                      >
-
-                        <span>
-                          📍
-                        </span>
-
-                        {historyCity}
-
-                      </button>
-
-                    )
-                  )}
-
-                </div>
-
-              </div>
-
-            )}
-
-
-            {error && (
-
-              <div className="error-message">
-                {error}
-              </div>
-
-            )}
-
-          </section>
-
-
-          {loading && (
-
-            <section className="loading-section">
-
-              <div className="loading-card">
-
-                <div className="loading-spinner" />
-
-                <div className="loading-content">
-
-                  <strong>
-                    Fetching weather intelligence
-                  </strong>
-
-                  <span>
-                    Getting live conditions, forecast,
-                    risk analysis, and weather events...
-                  </span>
-
-                </div>
-
-              </div>
-
-            </section>
-
-          )}
-
-
-          {weather && !loading && (
-
-            <>
-
-              <section className="weather-section">
-
-                <div className="weather-main-card">
-
-                  <span className="weather-location">
-                    {weather.city},{" "}
-                    {weather.state}
-                  </span>
-
-
-                  <div className="weather-main-content">
-
-                    <div>
-
-                      <p className="temperature">
-
-                        {weather.temperature ??
-                          "--"}
-
-                        <span className="temperature-unit">
-                          °C
-                        </span>
-
-                      </p>
-
-
-                      <div className="weather-description">
-                        {weather.description ||
-                          weather.condition ||
-                          "Current conditions"}
-                      </div>
-
-                    </div>
-
-
-                    <div className="current-condition">
-
-                      <span className="condition-icon">
-                        {weather.condition_icon ||
-                          "🌤️"}
-                      </span>
-
-                      <span className="condition-label">
-                        {weather.condition ||
-                          "Unknown conditions"}
-                      </span>
-
-                    </div>
-
-                  </div>
-                  <div className="ml-prediction-card">
-
-                    <div className="ml-prediction-title">
-                      🤖 ML Weather Prediction
-                    </div>
-
-                    <div className="ml-prediction-content">
-
-                      <div>
-                        <span className="ml-label">
-                          Predicted Event
-                        </span>
-
-                        <span className="ml-value">
-                          {weather.ml_event_type ||
-                            "Unavailable"}
-                        </span>
-                      </div>
-
-                      <div>
-                        <span className="ml-label">
-                          Confidence
-                        </span>
-
-                        <span className="ml-value">
-                          {weather.ml_confidence != null
-                            ? `${Math.round(
-                                weather.ml_confidence * 100
-                              )}%`
-                            : "Unavailable"}
-                        </span>
-                      </div>
-
-                    </div>
-
-                  </div>
-
-
-                  <div className="weather-details">
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Rain Chance
-                      </span>
-
-                      <span className="detail-value">
-                        {weather.precipitation_probability ??
-                          0}
-                        %
-                      </span>
-
-                    </div>
-
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Latitude
-                      </span>
-
-                      <span className="detail-value">
-                        {weather.latitude ??
-                          "--"}
-                      </span>
-
-                    </div>
-
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Longitude
-                      </span>
-
-                      <span className="detail-value">
-                        {weather.longitude ??
-                          "--"}
-                      </span>
-
-                    </div>
-
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Last Updated
-                      </span>
-
-                      <span className="detail-value">
-                        {formatLastUpdated()}
-                      </span>
-
-                    </div>
-
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Event Type
-                      </span>
-
-                      <span className="detail-value">
-                        {weather.event_type ||
-                          "Normal"}
-                      </span>
-
-                    </div>
-
-
-                    <div className="detail-item">
-
-                      <span className="detail-label">
-                        Auto Refresh
-                      </span>
-
-                      <span className="detail-value">
-                        Every 10 min
-                      </span>
-
-                    </div>
-
-                  </div>
-
-                </div>
-
-
-                <div className="risk-card">
-
-                  <div className="risk-header">
-
-                    <div>
-
-                      <h2 className="risk-title">
-                        Weather Risk
-                      </h2>
-
-                      <span className="risk-subtitle">
-                        Current atmospheric risk assessment
-                      </span>
-
-                    </div>
-
-
-                    <span className="risk-level">
-                      {weather.risk?.level ||
-                        "Unknown"}
-                    </span>
-
-                  </div>
-
-
-                  <div className="risk-score">
-
-                    <span className="risk-score-number">
-                      {weather.risk?.score ??
-                        0}
-                    </span>
-
-                    <span className="risk-score-label">
-                      / 100
-                    </span>
-
-                  </div>
-
-
-                  <div className="risk-bar">
-
-                    <div
-                      className="risk-bar-fill"
-                      style={{
-                        width: `${Math.min(
-                          weather.risk?.score ??
-                            0,
-                          100
-                        )}%`,
-                      }}
-                    />
-
-                  </div>
-
-
-                  <div className="risk-reasons">
-
-                    <div className="risk-reasons-title">
-                      Risk factors
-                    </div>
-
-
-                    {(
-                      weather.risk?.reasons ||
-                      []
-                    ).map(
-                      (reason, index) => (
-
-                        <div
-                          className="risk-reason"
-                          key={`${reason}-${index}`}
-                        >
-                          {reason}
-                        </div>
-
-                      )
-                    )}
-
-                  </div>
-
-                </div>
-
-              </section>
-
-
-              <div className="weather-actions">
-
-                <button
-                  type="button"
-                  className="refresh-button"
-                  onClick={
-                    handleManualRefresh
-                  }
-                  disabled={
-                    refreshing ||
-                    loading
-                  }
-                >
-
-                  <span
-                    className={
-                      refreshing
-                        ? "refresh-icon spinning"
-                        : "refresh-icon"
-                    }
-                  >
-                    ↻
-                  </span>
-
-                  {refreshing
-                    ? "Refreshing..."
-                    : "Refresh Weather"}
-
-                </button>
-
-                <span className="refresh-note">
-                  Automatically updates every 10 minutes
-                </span>
-
-              </div>
-
-
-              <ForecastChart
-                forecast={
-                  weather.forecast || []
-                }
-              />
-
-
-              <HourlyWeather
-                hourly={
-                  weather.hourly || []
-                }
-              />
-
-            </>
-
-          )}
-
-
-          {/* Report Submission */}
-
-          <section
-            className="reports-section"
-            style={{
-              marginTop: "32px",
-            }}
-          >
-
-            <div className="reports-header">
-
-              <h2>
-                Submit Weather Report
-              </h2>
-
-              <p>
-                Share a local weather observation with WeatherNova.
-              </p>
-
-            </div>
-
-
-            <form
-              onSubmit={handleReportSubmit}
-              style={{
-                display: "grid",
-                gap: "16px",
-                padding: "24px",
-                borderRadius: "16px",
-                border:
-                  "1px solid rgba(148, 163, 184, 0.16)",
-                background:
-                  "rgba(15, 29, 48, 0.65)",
-              }}
-            >
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns:
-                    "repeat(auto-fit, minmax(220px, 1fr))",
-                  gap: "16px",
-                }}
-              >
-
-                <div>
-                  <label
-                    htmlFor="report-city"
-                    style={{
-                      display: "block",
-                      marginBottom: "7px",
-                      fontSize: "13px",
-                      color: "#94a3b8",
-                    }}
-                  >
-                    City
-                  </label>
-
-                  <input
-                    id="report-city"
-                    name="city"
-                    type="text"
-                    value={reportForm.city}
-                    onChange={
-                      handleReportInputChange
-                    }
-                    placeholder="Enter city"
-                    disabled={
-                      reportSubmitting
-                    }
-                    style={{
-                      width: "100%",
-                      boxSizing: "border-box",
-                      padding: "12px 14px",
-                      borderRadius: "10px",
-                      border:
-                        "1px solid rgba(148, 163, 184, 0.2)",
-                      background:
-                        "rgba(2, 8, 23, 0.55)",
-                      color: "#e2e8f0",
-                      outline: "none",
-                    }}
-                  />
-
-                </div>
-
-
-                <div>
-                  <label
-                    htmlFor="report-state"
-                    style={{
-                      display: "block",
-                      marginBottom: "7px",
-                      fontSize: "13px",
-                      color: "#94a3b8",
-                    }}
-                  >
-                    State / Region
-                  </label>
-
-                  <input
-                    id="report-state"
-                    name="state"
-                    type="text"
-                    value={reportForm.state}
-                    onChange={
-                      handleReportInputChange
-                    }
-                    placeholder="Enter state or region"
-                    disabled={
-                      reportSubmitting
-                    }
-                    style={{
-                      width: "100%",
-                      boxSizing: "border-box",
-                      padding: "12px 14px",
-                      borderRadius: "10px",
-                      border:
-                        "1px solid rgba(148, 163, 184, 0.2)",
-                      background:
-                        "rgba(2, 8, 23, 0.55)",
-                      color: "#e2e8f0",
-                      outline: "none",
-                    }}
-                  />
-
-                </div>
-
-
-                <div>
-                  <label
-                    htmlFor="report-event-type"
-                    style={{
-                      display: "block",
-                      marginBottom: "7px",
-                      fontSize: "13px",
-                      color: "#94a3b8",
-                    }}
-                  >
-                    Event Type
-                  </label>
-
-                  <select
-                    id="report-event-type"
-                    name="event_type"
-                    value={
-                      reportForm.event_type
-                    }
-                    onChange={
-                      handleReportInputChange
-                    }
-                    disabled={
-                      reportSubmitting
-                    }
-                    style={{
-                      width: "100%",
-                      boxSizing: "border-box",
-                      padding: "12px 14px",
-                      borderRadius: "10px",
-                      border:
-                        "1px solid rgba(148, 163, 184, 0.2)",
-                      background:
-                        "#0f1d30",
-                      color: "#e2e8f0",
-                      outline: "none",
-                    }}
-                  >
-
-                    <option value="Clear/Cloudy">
-                      Clear / Cloudy
-                    </option>
-
-                    <option value="Rain">
-                      Rain
-                    </option>
-
-                    <option value="Thunderstorm">
-                      Thunderstorm
-                    </option>
-
-                    <option value="Snow">
-                      Snow
-                    </option>
-
-                    <option value="Fog">
-                      Fog
-                    </option>
-
-                    <option value="Wind">
-                      Strong Wind
-                    </option>
-
-                    <option value="Extreme Weather">
-                      Extreme Weather
-                    </option>
-
-                    <option value="Other">
-                      Other
-                    </option>
-
-                  </select>
-
-                </div>
-
-              </div>
-
-
-              <div>
-
-                <label
-                  htmlFor="report-description"
-                  style={{
-                    display: "block",
-                    marginBottom: "7px",
-                    fontSize: "13px",
-                    color: "#94a3b8",
-                  }}
-                >
-                  Weather Observation
-                </label>
-
-                <textarea
-                  id="report-description"
-                  name="description"
-                  value={
-                    reportForm.description
-                  }
-                  onChange={
-                    handleReportInputChange
-                  }
-                  placeholder="Describe what you are observing..."
-                  rows="4"
-                  disabled={
-                    reportSubmitting
-                  }
-                  style={{
-                    width: "100%",
-                    boxSizing: "border-box",
-                    padding: "12px 14px",
-                    borderRadius: "10px",
-                    border:
-                      "1px solid rgba(148, 163, 184, 0.2)",
-                    background:
-                      "rgba(2, 8, 23, 0.55)",
-                    color: "#e2e8f0",
-                    outline: "none",
-                    resize: "vertical",
-                    fontFamily:
-                      "inherit",
-                  }}
-                />
-
-              </div>
-
-
-              {reportMessage && (
-
-                <div
-                  style={{
-                    padding: "11px 14px",
-                    borderRadius: "10px",
-                    background:
-                      reportMessage.includes(
-                        "successfully"
-                      )
-                        ? "rgba(34, 197, 94, 0.10)"
-                        : "rgba(239, 68, 68, 0.10)",
-                    border:
-                      reportMessage.includes(
-                        "successfully"
-                      )
-                        ? "1px solid rgba(34, 197, 94, 0.2)"
-                        : "1px solid rgba(239, 68, 68, 0.2)",
-                    color:
-                      reportMessage.includes(
-                        "successfully"
-                      )
-                        ? "#86efac"
-                        : "#fca5a5",
-                    fontSize: "14px",
-                  }}
-                >
-                  {reportMessage}
-                </div>
-
-              )}
-
-
-              <div>
-
-                <button
-                  type="submit"
-                  className="search-button"
-                  disabled={
-                    reportSubmitting
-                  }
-                >
-                  {reportSubmitting
-                    ? "Submitting..."
-                    : "Submit Weather Report"}
-                </button>
-
-              </div>
-
-            </form>
-
-          </section>
-
-
-          {analytics && (
-
-            <section className="analytics-section">
-
-              <div className="section-heading">
-
-                <span className="section-eyebrow">
-                  Intelligence Layer
-                </span>
-
-                <h2>
-                  Weather Analytics
-                </h2>
-
-                <p>
-                  Aggregated signals from WeatherNova's
-                  collected weather reports and events.
-                </p>
-
-              </div>
-
-
-              <AnalyticsCards
-                analytics={analytics}
-              />
-
-
-              <div className="analytics-grid">
-
-                <EventChart
-                  data={
-                    analytics.reports_by_event ||
-                    []
-                  }
-                />
-
-
-                <StateChart
-                  data={
-                    analytics.reports_by_state ||
-                    []
-                  }
-                />
-
-
-                <SeverityChart
-                  data={
-                    analytics.events_by_severity ||
-                    []
-                  }
-                />
-
-              </div>
-
-            </section>
-
-          )}
-
-
-          <EventsList
-            events={events}
+    <>
+      <PageHeader
+        eyebrow="Live Weather"
+        title="Search current weather"
+        description="Fetch current conditions, hourly forecast, 7-day outlook, ML classification, duplicate detection, and risk scoring."
+      />
+      <section className="search-section">
+        <form
+          className="search-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            searchWeather(city);
+          }}
+        >
+          <input
+            className="search-input"
+            value={city}
+            onChange={(event) => setCity(event.target.value)}
+            placeholder="Search for a city..."
           />
-
-
-          <section className="reports-section">
-
-            <div className="reports-header">
-
-              <h2>
-                Recent Weather Reports
-              </h2>
-
-              <p>
-                Latest reports processed by WeatherNova.
-              </p>
-
+          <button className="search-button" disabled={loading}>
+            {loading ? "Loading..." : "Search"}
+          </button>
+          <button className="search-button secondary-button" type="button" onClick={useLocation} disabled={locating}>
+            {locating ? "Locating..." : "Use Location"}
+          </button>
+        </form>
+        {history.length > 0 && (
+          <div className="history-list">
+            {history.map((item) => (
+              <button className="history-chip" key={item} onClick={() => searchWeather(item)}>
+                {item}
+              </button>
+            ))}
+          </div>
+        )}
+        {error && <div className="error-message">{error}</div>}
+      </section>
+      {weather && (
+        <>
+          <section className="weather-section">
+            <div className="weather-main-card">
+              <span className="weather-location">{weather.city}, {weather.state}</span>
+              <div className="weather-main-content">
+                <div>
+                  <h2 className="temperature">
+                    {Math.round(weather.temperature)}
+                    <span className="temperature-unit">C</span>
+                  </h2>
+                  <div className="weather-description">{weather.condition}</div>
+                </div>
+                <div className="current-condition">
+                  <span className="condition-icon">{weather.condition_icon}</span>
+                  <span className="condition-label">{weather.event_type}</span>
+                </div>
+              </div>
+              <div className="weather-details">
+                <Detail label="Humidity" value={`${weather.humidity}%`} />
+                <Detail label="Wind" value={`${weather.wind_speed} km/h`} />
+                <Detail label="Rain Chance" value={`${weather.precipitation_probability ?? 0}%`} />
+                <Detail label="ML Class" value={weather.ml_event_type} />
+                <Detail label="ML Confidence" value={`${Math.round((weather.ml_confidence || 0) * 100)}%`} />
+                <Detail label="Duplicate" value={weather.is_duplicate ? "Yes" : "No"} />
+              </div>
             </div>
-
-
-            <div className="table-wrapper">
-
-              <table className="reports-table">
-
-                <thead>
-
-                  <tr>
-
-                    <th>
-                      Source
-                    </th>
-
-                    <th>
-                      Event
-                    </th>
-
-                    <th>
-                      Location
-                    </th>
-
-                    <th>
-                      Status
-                    </th>
-
-                    <th>
-                      Trust
-                    </th>
-
-                    <th>
-                      Time
-                    </th>
-
-                  </tr>
-
-                </thead>
-
-
-                <tbody>
-
-                  {reports.length === 0 ? (
-
-                    <tr>
-
-                      <td
-                        colSpan="6"
-                        style={{
-                          textAlign:
-                            "center",
-                        }}
-                      >
-                        No weather reports yet.
-                      </td>
-
-                    </tr>
-
-                  ) : (
-
-                    reports.map(
-                      (report) => (
-
-                        <tr
-                          key={report.id}
-                        >
-
-                          <td className="report-source">
-                            {report.source}
-                          </td>
-
-                          <td className="report-event">
-                            {report.event_type}
-                          </td>
-
-                          <td>
-                            {report.city},{" "}
-                            {report.state}
-                          </td>
-
-                          <td>
-
-                            <span className="report-status">
-                              {report.verification_status}
-                            </span>
-
-                          </td>
-
-                          <td>
-                            {report.trust_score}
-                          </td>
-
-                          <td>
-                            {report.timestamp
-                              ? new Date(
-                                  report.timestamp
-                                ).toLocaleString()
-                              : "--"}
-                          </td>
-
-                        </tr>
-
-                      )
-                    )
-
-                  )}
-
-                </tbody>
-
-              </table>
-
+            <div className="risk-card">
+              <div className="risk-header">
+                <div>
+                  <h2 className="risk-title">Risk Score</h2>
+                  <span className="risk-subtitle">Current weather event risk</span>
+                </div>
+                <span className="risk-level">{weather.risk?.level}</span>
+              </div>
+              <div className="risk-score">
+                <span className="risk-score-number">{weather.risk?.score ?? 0}</span>
+                <span className="risk-score-label">/ 100</span>
+              </div>
+              <div className="risk-bar">
+                <div className="risk-bar-fill" style={{ width: `${weather.risk?.score ?? 0}%` }} />
+              </div>
+              <div className="risk-reasons">
+                {(weather.risk?.reasons || []).map((reason) => (
+                  <div className="risk-reason" key={reason}>{reason}</div>
+                ))}
+              </div>
             </div>
-
           </section>
+          <ForecastChart forecast={weather.forecast || []} />
+          <HourlyWeather hourly={weather.hourly || []} />
+        </>
+      )}
+    </>
+  );
+}
 
-
-        </main>
-
-
-        <footer className="footer">
-
-          <span>
-            <strong>
-              WeatherNova
-            </strong>{" "}
-            Weather Intelligence Platform
-          </span>
-
-          <span>
-            Open-Meteo · FastAPI · PostgreSQL
-          </span>
-
-        </footer>
-
-      </div>
-
+function Detail({ label, value }) {
+  return (
+    <div className="detail-item">
+      <span className="detail-label">{label}</span>
+      <span className="detail-value">{value ?? "--"}</span>
     </div>
   );
 }
 
+function MapPage({ reports }) {
+  const plotted = reports.filter((report) => report.latitude && report.longitude);
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Weather Map"
+        title="Geospatial report view"
+        description="Mapped report coordinates with verification context."
+      />
+      <section className="map-panel">
+        <div className="map-canvas">
+          {plotted.slice(0, 60).map((report) => (
+            <span
+              className={`map-point map-${report.verification_status}`}
+              key={report.id}
+              title={`${report.event_type} in ${report.city}`}
+              style={{
+                left: `${Math.min(96, Math.max(4, ((Number(report.longitude) + 180) / 360) * 100))}%`,
+                top: `${Math.min(92, Math.max(8, (1 - (Number(report.latitude) + 90) / 180) * 100))}%`,
+              }}
+            />
+          ))}
+        </div>
+      </section>
+      <section className="reports-section">
+        <DataTable
+          rows={plotted}
+          columns={[
+            { key: "event_type", label: "Event" },
+            { key: "city", label: "City" },
+            { key: "state", label: "State" },
+            { key: "latitude", label: "Lat" },
+            { key: "longitude", label: "Lng" },
+            {
+              key: "verification_status",
+              label: "Status",
+              render: (row) => <StatusPill>{row.verification_status}</StatusPill>,
+            },
+          ]}
+        />
+      </section>
+    </>
+  );
+}
+
+function ReportsPage({ reports, title = "Report review queue" }) {
+  const [filters, setFilters] = useState({ event_type: "", state: "", verification_status: "" });
+  const eventTypes = [...new Set(reports.map((report) => report.event_type).filter(Boolean))];
+  const states = [...new Set(reports.map((report) => report.state).filter(Boolean))];
+  const filtered = reports.filter((report) =>
+    (!filters.event_type || report.event_type === filters.event_type) &&
+    (!filters.state || report.state === filters.state) &&
+    (!filters.verification_status || report.verification_status === filters.verification_status)
+  );
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Reports"
+        title={title}
+        description="Filter, inspect, and export weather reports collected from APIs and citizens."
+      />
+      <FilterBar filters={filters} setFilters={setFilters} eventTypes={eventTypes} states={states} />
+      <div className="action-row">
+        <a className="download-button" href={`${API_BASE_URL}/reports/export`}>Export CSV</a>
+      </div>
+      <section className="reports-section">
+        <DataTable
+          rows={filtered}
+          columns={[
+            { key: "source", label: "Source" },
+            { key: "event_type", label: "Event" },
+            { key: "city", label: "City" },
+            { key: "state", label: "State" },
+            {
+              key: "verification_status",
+              label: "Status",
+              render: (row) => <StatusPill>{row.verification_status}</StatusPill>,
+            },
+            { key: "confidence_score", label: "Confidence" },
+            { key: "is_duplicate", label: "Duplicate", render: (row) => row.is_duplicate ? "Yes" : "No" },
+          ]}
+        />
+      </section>
+    </>
+  );
+}
+
+function FilterBar({ filters, setFilters, eventTypes, states }) {
+  return (
+    <section className="filter-bar">
+      <select value={filters.event_type} onChange={(event) => setFilters((old) => ({ ...old, event_type: event.target.value }))}>
+        <option value="">All events</option>
+        {eventTypes.map((item) => <option key={item}>{item}</option>)}
+      </select>
+      <select value={filters.state} onChange={(event) => setFilters((old) => ({ ...old, state: event.target.value }))}>
+        <option value="">All locations</option>
+        {states.map((item) => <option key={item}>{item}</option>)}
+      </select>
+      <select value={filters.verification_status} onChange={(event) => setFilters((old) => ({ ...old, verification_status: event.target.value }))}>
+        <option value="">All verification</option>
+        <option value="pending">Pending</option>
+        <option value="verified">Verified</option>
+        <option value="rejected">Rejected</option>
+      </select>
+    </section>
+  );
+}
+
+function AnalyticsPage({ analytics }) {
+  const colors = ["#38bdf8", "#22c55e", "#f97316", "#eab308", "#f43f5e"];
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Analytics"
+        title="Weather intelligence analytics"
+        description="Event distribution, location concentration, severity mix, and verification health."
+      />
+      <div className="analytics-cards">
+        <Metric label="Reports" value={analytics?.total_reports} note="Total stored reports" />
+        <Metric label="Events" value={analytics?.total_events} note="Detected weather events" />
+        <Metric label="Verified" value={analytics?.verified_reports} note="Verified reports" />
+        <Metric label="Duplicates" value={analytics?.duplicate_reports} note="Duplicate reports" />
+      </div>
+      <section className="analytics-grid">
+        <ChartCard title="Reports by Event">
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={analytics?.reports_by_event || []}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,.15)" />
+              <XAxis dataKey="event_type" stroke="#94a3b8" />
+              <YAxis stroke="#94a3b8" />
+              <Tooltip />
+              <Bar dataKey="count" fill="#38bdf8" />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+        <ChartCard title="Events by Severity">
+          <ResponsiveContainer width="100%" height={260}>
+            <PieChart>
+              <Pie data={analytics?.events_by_severity || []} dataKey="count" nameKey="severity" outerRadius={95}>
+                {(analytics?.events_by_severity || []).map((entry, index) => (
+                  <Cell key={entry.severity} fill={colors[index % colors.length]} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        </ChartCard>
+      </section>
+    </>
+  );
+}
+
+function ChartCard({ title, children }) {
+  return (
+    <div className="analytics-chart-card">
+      <h2 className="analytics-chart-title">{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+function AlertsPage({ alerts }) {
+  return (
+    <>
+      <PageHeader
+        eyebrow="Alerts"
+        title="Active alert center"
+        description="Verified high-signal events and non-normal weather reports."
+      />
+      <section className="reports-section">
+        <DataTable
+          rows={alerts.active_alerts}
+          columns={[
+            { key: "title", label: "Alert" },
+            { key: "event_type", label: "Event" },
+            { key: "city", label: "City" },
+            { key: "state", label: "State" },
+            {
+              key: "severity",
+              label: "Severity",
+              render: (row) => <StatusPill tone={row.severity === "high" ? "danger" : "warn"}>{row.severity}</StatusPill>,
+            },
+            { key: "status", label: "Status" },
+          ]}
+        />
+      </section>
+    </>
+  );
+}
+
+function CitizenReport({ reload }) {
+  const [form, setForm] = useState({ city: "", state: "", event_type: "Rain", description: "", latitude: "", longitude: "" });
+  const [message, setMessage] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setMessage("");
+
+    try {
+      await request("/reports/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          latitude: form.latitude ? Number(form.latitude) : null,
+          longitude: form.longitude ? Number(form.longitude) : null,
+          source: "WeatherNova User",
+          verification_status: "pending",
+        }),
+      });
+      setMessage("Report submitted for verification.");
+      setForm((old) => ({ ...old, description: "" }));
+      await reload();
+    } catch (err) {
+      setMessage(err.message || "Unable to submit report.");
+    }
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Citizen Reports"
+        title="Submit local weather evidence"
+        description="Capture metadata required for verification: time, city, state, GPS, source, category, and observation text."
+      />
+      <form className="form-panel" onSubmit={submit}>
+        {["city", "state", "latitude", "longitude"].map((field) => (
+          <input key={field} value={form[field]} placeholder={field.replace("_", " ")} onChange={(event) => setForm((old) => ({ ...old, [field]: event.target.value }))} />
+        ))}
+        <select value={form.event_type} onChange={(event) => setForm((old) => ({ ...old, event_type: event.target.value }))}>
+          {["Rain", "Thunderstorm", "Snow", "Fog", "Wind", "Extreme Weather", "Clear/Cloudy", "Other"].map((item) => <option key={item}>{item}</option>)}
+        </select>
+        <textarea value={form.description} placeholder="Observation, impact, photos/videos link, or source notes" onChange={(event) => setForm((old) => ({ ...old, description: event.target.value }))} />
+        <button className="search-button">Submit Report</button>
+        {message && <div className="error-message">{message}</div>}
+      </form>
+    </>
+  );
+}
+
+function EventsPanel({ events }) {
+  return (
+    <section className="events-section">
+      <div className="events-header">
+        <div>
+          <h2>Weather Events</h2>
+          <p>Detected and admin-managed weather events.</p>
+        </div>
+      </div>
+      <div className="events-grid">
+        {events.length === 0 ? <p>No active events yet.</p> : events.slice(0, 9).map((event) => (
+          <div className="event-card" key={event.id}>
+            <div className="event-title">{event.title}</div>
+            <div className="event-location">{event.city}, {event.state}</div>
+            <div className="event-meta">
+              <span className={`severity-badge severity-${event.severity}`}>{event.severity}</span>
+              <span className="event-status">{event.status}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminLogin() {
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [message, setMessage] = useState("");
+
+  async function login(event) {
+    event.preventDefault();
+
+    try {
+      const data = await request("/admin-api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      localStorage.setItem("weathernova_admin_token", data.token);
+      navigate("/admin/dashboard");
+    } catch (err) {
+      setMessage(err.message || "Login failed.");
+    }
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Admin"
+        title="Admin login"
+        description="Authenticate to review reports, manage events, configure sources, and inspect audit logs."
+      />
+      <form className="form-panel compact-form" onSubmit={login}>
+        <input value={form.username} placeholder="Username" onChange={(event) => setForm((old) => ({ ...old, username: event.target.value }))} />
+        <input value={form.password} type="password" placeholder="Password" onChange={(event) => setForm((old) => ({ ...old, password: event.target.value }))} />
+        <button className="search-button">Login</button>
+        {message && <div className="error-message">{message}</div>}
+      </form>
+    </>
+  );
+}
+
+function AdminPages({ path, data }) {
+  const [adminSummary, setAdminSummary] = useState(null);
+  const [audit, setAudit] = useState([]);
+  const [message, setMessage] = useState("");
+
+  const loadAdmin = useCallback(async () => {
+    try {
+      const [summary, auditRows] = await Promise.all([
+        request("/admin-api/dashboard", { headers: authHeaders() }),
+        request("/admin-api/audit", { headers: authHeaders() }),
+      ]);
+      setAdminSummary(summary);
+      setAudit(auditRows);
+      setMessage("");
+    } catch (err) {
+      setMessage(`${err.message}. Please log in again if your session expired.`);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAdmin();
+  }, [loadAdmin]);
+
+  async function updateReport(report, patch) {
+    await request(`/admin-api/reports/${report.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(patch),
+    });
+    await data.reload();
+    await loadAdmin();
+  }
+
+  async function updateEvent(event, patch) {
+    await request(`/admin-api/events/${event.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(patch),
+    });
+    await data.reload();
+    await loadAdmin();
+  }
+
+  if (path === "/admin/audit") {
+    return (
+      <>
+        <PageHeader eyebrow="Admin" title="Audit logs" description="Trace report reviews, event edits, and source management actions." />
+        {message && <div className="error-message">{message}</div>}
+        <section className="reports-section">
+          <DataTable rows={audit} columns={[
+            { key: "actor", label: "Actor" },
+            { key: "action", label: "Action" },
+            { key: "entity_type", label: "Entity" },
+            { key: "entity_id", label: "ID" },
+            { key: "created_at", label: "Time" },
+          ]} />
+        </section>
+      </>
+    );
+  }
+
+  if (path === "/admin/events") {
+    return (
+      <>
+        <PageHeader eyebrow="Admin" title="Event management" description="Close, reopen, and classify tracked weather events." />
+        <EventsPanel events={data.events} />
+        <section className="reports-section">
+          {data.events.map((event) => (
+            <div className="admin-action-row" key={event.id}>
+              <span>{event.title}</span>
+              <button onClick={() => updateEvent(event, { status: "active" })}>Active</button>
+              <button onClick={() => updateEvent(event, { status: "resolved" })}>Resolved</button>
+            </div>
+          ))}
+        </section>
+      </>
+    );
+  }
+
+  if (path === "/admin/sources") {
+    return (
+      <>
+        <PageHeader eyebrow="Admin" title="Source management" description="Monitor source types, active status, and reliability scoring." />
+        <section className="reports-section">
+          <DataTable rows={data.sources} columns={[
+            { key: "name", label: "Source" },
+            { key: "source_type", label: "Type" },
+            { key: "reliability_score", label: "Reliability", render: (row) => `${Math.round(row.reliability_score * 100)}%` },
+            { key: "is_active", label: "Active", render: (row) => row.is_active ? "Yes" : "No" },
+          ]} />
+        </section>
+      </>
+    );
+  }
+
+  if (path === "/admin/reports") {
+    return (
+      <>
+        <PageHeader eyebrow="Admin" title="Report review" description="Verify, reject, or mark duplicate reports." />
+        {message && <div className="error-message">{message}</div>}
+        <section className="reports-section">
+          {data.reports.map((report) => (
+            <div className="admin-action-row" key={report.id}>
+              <span>{report.event_type} in {report.city} from {report.source}</span>
+              <button onClick={() => updateReport(report, { verification_status: "verified", trust_score: 0.9, confidence_score: 0.9 })}>Verify</button>
+              <button onClick={() => updateReport(report, { verification_status: "rejected", trust_score: 0.1 })}>Reject</button>
+              <button onClick={() => updateReport(report, { is_duplicate: true })}>Duplicate</button>
+            </div>
+          ))}
+        </section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <PageHeader eyebrow="Admin" title="Admin dashboard" description="Review operational counts and jump into moderation tools." />
+      {message && <div className="error-message">{message}</div>}
+      <div className="analytics-cards">
+        <Metric label="Pending" value={adminSummary?.pending_reports} note="Awaiting review" />
+        <Metric label="Verified" value={adminSummary?.verified_reports} note="Approved reports" />
+        <Metric label="Rejected" value={adminSummary?.rejected_reports} note="Rejected reports" />
+        <Metric label="Audit" value={adminSummary?.audit_entries} note="Logged actions" />
+      </div>
+    </>
+  );
+}
+
+function App() {
+  const [path, setPath] = useState(currentPath());
+  const data = useCoreData();
+
+  useEffect(() => {
+    const onPop = () => setPath(currentPath());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const page = useMemo(() => {
+    if (path === "/weather") return <WeatherPage reload={data.reload} />;
+    if (path === "/map") return <MapPage reports={data.reports} />;
+    if (path === "/history") return <ReportsPage reports={data.reports} title="Historical weather reports" />;
+    if (path === "/reports") return <ReportsPage reports={data.reports} />;
+    if (path === "/analytics") return <AnalyticsPage analytics={data.analytics} />;
+    if (path === "/alerts") return <AlertsPage alerts={data.alerts} />;
+    if (path === "/report") return <CitizenReport reload={data.reload} />;
+    if (path === "/admin/login") return <AdminLogin />;
+    if (path.startsWith("/admin")) return <AdminPages path={path} data={data} />;
+    return <Dashboard data={data} />;
+  }, [path, data]);
+
+  return (
+    <div className="app">
+      <div className="app-container">
+        <header className="topbar">
+          <button className="brand nav-button" onClick={() => navigate("/dashboard")}>
+            <div className="brand-mark">WN</div>
+            <div className="brand-text">
+              <span className="brand-name">WeatherNova</span>
+              <span className="brand-subtitle">Weather Intelligence</span>
+            </div>
+          </button>
+          <div className="system-status"><span className="status-dot" /> API Connected</div>
+        </header>
+        <nav className="route-nav">
+          {routes.map(([href, label]) => (
+            <button className={path === href ? "active" : ""} key={href} onClick={() => navigate(href)}>
+              {label}
+            </button>
+          ))}
+        </nav>
+        <main>{page}</main>
+        <footer className="footer">
+          <span><strong>WeatherNova</strong> SIH26069 weather intelligence platform</span>
+          <span>Open-Meteo / FastAPI / PostgreSQL / React</span>
+        </footer>
+      </div>
+    </div>
+  );
+}
 
 export default App;
