@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import AnalyticsCards from "./components/AnalyticsCards";
 import EventChart from "./components/EventChart";
@@ -11,7 +11,9 @@ import StateChart from "./components/StateChart";
 import "./App.css";
 
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://127.0.0.1:8000";
 
 
 function App() {
@@ -63,7 +65,7 @@ function App() {
     useState("");
 
 
-  async function loadAnalytics() {
+  const loadAnalytics = useCallback(async () => {
     const response =
       await fetch(
         `${API_BASE_URL}/analytics/summary`
@@ -79,10 +81,10 @@ function App() {
       await response.json();
 
     setAnalytics(data);
-  }
+  }, []);
 
 
-  async function loadReports() {
+  const loadReports = useCallback(async () => {
     const response =
       await fetch(
         `${API_BASE_URL}/reports/`
@@ -98,10 +100,10 @@ function App() {
       await response.json();
 
     setReports(data);
-  }
+  }, []);
 
 
-  async function loadEvents() {
+  const loadEvents = useCallback(async () => {
     const response =
       await fetch(
         `${API_BASE_URL}/events/`
@@ -117,10 +119,10 @@ function App() {
       await response.json();
 
     setEvents(data);
-  }
+  }, []);
 
 
-  async function searchWeather(cityName) {
+  const searchWeather = useCallback(async (cityName) => {
     const trimmedCity =
       cityName.trim();
 
@@ -156,7 +158,7 @@ function App() {
             message =
               errorData.detail;
           }
-        } catch (err) {
+        } catch {
           // Keep default error message.
         }
 
@@ -219,12 +221,16 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [
+    loadAnalytics,
+    loadEvents,
+    loadReports,
+  ]);
 
 
-  async function refreshWeather(
+  const refreshWeather = useCallback(async (
     showLoading = false
-  ) {
+  ) => {
     if (!city.trim()) {
       return;
     }
@@ -293,7 +299,12 @@ function App() {
         setRefreshing(false);
       }
     }
-  }
+  }, [
+    city,
+    loadAnalytics,
+    loadEvents,
+    loadReports,
+  ]);
 
 
   async function handleManualRefresh() {
@@ -339,7 +350,7 @@ function App() {
               if (errorData.detail) {
                 message = errorData.detail;
               }
-            } catch (err) {
+            } catch {
               // Keep default error message.
             }
 
@@ -545,7 +556,7 @@ function App() {
                 errorData.detail;
             }
           }
-        } catch (err) {
+        } catch {
           // Keep default message.
         }
 
@@ -587,6 +598,83 @@ function App() {
 
 
   useEffect(() => {
+    let isMounted = true;
+
+    async function loadInitialData() {
+      setError("");
+
+      try {
+        const [
+          analyticsData,
+          reportsData,
+          eventsData,
+        ] = await Promise.all([
+          fetch(
+            `${API_BASE_URL}/analytics/summary`
+          ).then((response) => {
+            if (!response.ok) {
+              throw new Error(
+                "Unable to load analytics."
+              );
+            }
+
+            return response.json();
+          }),
+          fetch(
+            `${API_BASE_URL}/reports/`
+          ).then((response) => {
+            if (!response.ok) {
+              throw new Error(
+                "Unable to load reports."
+              );
+            }
+
+            return response.json();
+          }),
+          fetch(
+            `${API_BASE_URL}/events/`
+          ).then((response) => {
+            if (!response.ok) {
+              throw new Error(
+                "Unable to load events."
+              );
+            }
+
+            return response.json();
+          }),
+        ]);
+
+        if (!isMounted) {
+          return;
+        }
+
+        setAnalytics(analyticsData);
+        setReports(reportsData);
+        setEvents(eventsData);
+      } catch (err) {
+        console.error(
+          "Initial dashboard load error:",
+          err
+        );
+
+        if (isMounted) {
+          setError(
+            err.message ||
+              "Unable to load dashboard data."
+          );
+        }
+      }
+    }
+
+    loadInitialData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+
+  useEffect(() => {
     if (!city.trim() || !weather) {
       return undefined;
     }
@@ -604,7 +692,7 @@ function App() {
         refreshInterval
       );
     };
-  }, [city, weather]);
+  }, [city, weather, refreshWeather]);
 
 
   function formatLastUpdated() {

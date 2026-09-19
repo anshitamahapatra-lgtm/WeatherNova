@@ -1,4 +1,6 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://127.0.0.1:8000";
 
 
 async function fetchApi(endpoint) {
@@ -59,8 +61,6 @@ export async function getRecentReports(
   limit = 10,
   filters = {}
 ) {
-  const filterQuery = buildFilterQuery(filters);
-
   const query = new URLSearchParams();
 
   query.append("limit", limit);

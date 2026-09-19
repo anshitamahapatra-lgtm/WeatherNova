@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -21,8 +21,36 @@ def get_db():
         db.close()
 
 
+def apply_report_filters(
+    query,
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
+):
+    if event_type:
+        query = query.filter(
+            WeatherReport.event_type == event_type
+        )
+
+    if state:
+        query = query.filter(
+            WeatherReport.state == state
+        )
+
+    if verification_status:
+        query = query.filter(
+            WeatherReport.verification_status
+            == verification_status
+        )
+
+    return query
+
+
 @router.get("/summary")
 def analytics_summary(
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
     db: Session = Depends(get_db),
 ):
     # ---------------------------------------------------------
@@ -30,7 +58,15 @@ def analytics_summary(
     # ---------------------------------------------------------
 
     total_reports = (
-        db.query(
+        apply_report_filters(
+            db.query(
+                WeatherReport
+            ),
+            event_type,
+            state,
+            verification_status,
+        )
+        .with_entities(
             func.count(WeatherReport.id)
         )
         .scalar()
@@ -56,12 +92,16 @@ def analytics_summary(
     # ---------------------------------------------------------
 
     verified_reports = (
-        db.query(
-            func.count(WeatherReport.id)
+        apply_report_filters(
+            db.query(WeatherReport),
+            event_type,
+            state,
+            verification_status,
         )
         .filter(
             WeatherReport.verification_status == "verified"
         )
+        .with_entities(func.count(WeatherReport.id))
         .scalar()
         or 0
     )
@@ -72,12 +112,16 @@ def analytics_summary(
     # ---------------------------------------------------------
 
     duplicate_reports = (
-        db.query(
-            func.count(WeatherReport.id)
+        apply_report_filters(
+            db.query(WeatherReport),
+            event_type,
+            state,
+            verification_status,
         )
         .filter(
             WeatherReport.is_duplicate.is_(True)
         )
+        .with_entities(func.count(WeatherReport.id))
         .scalar()
         or 0
     )
@@ -88,7 +132,15 @@ def analytics_summary(
     # ---------------------------------------------------------
 
     event_results = (
-        db.query(
+        apply_report_filters(
+            db.query(
+                WeatherReport
+            ),
+            event_type,
+            state,
+            verification_status,
+        )
+        .with_entities(
             WeatherReport.event_type,
             func.count(
                 WeatherReport.id
@@ -115,7 +167,15 @@ def analytics_summary(
     # ---------------------------------------------------------
 
     state_results = (
-        db.query(
+        apply_report_filters(
+            db.query(
+                WeatherReport
+            ),
+            event_type,
+            state,
+            verification_status,
+        )
+        .with_entities(
             WeatherReport.state,
             func.count(
                 WeatherReport.id
@@ -186,10 +246,15 @@ def analytics_summary(
 
 @router.get("/reports-by-event")
 def reports_by_event(
+    state: str | None = None,
     db: Session = Depends(get_db),
 ):
     results = (
-        db.query(
+        apply_report_filters(
+            db.query(WeatherReport),
+            state=state,
+        )
+        .with_entities(
             WeatherReport.event_type,
             func.count(
                 WeatherReport.id
@@ -216,10 +281,15 @@ def reports_by_event(
 
 @router.get("/reports-by-state")
 def reports_by_state(
+    event_type: str | None = None,
     db: Session = Depends(get_db),
 ):
     results = (
-        db.query(
+        apply_report_filters(
+            db.query(WeatherReport),
+            event_type=event_type,
+        )
+        .with_entities(
             WeatherReport.state,
             func.count(
                 WeatherReport.id
@@ -268,3 +338,113 @@ def events_by_severity(
         }
         for severity, count in results
     ]
+
+
+@router.get("/recent-reports")
+def recent_reports(
+    limit: int = Query(10, ge=1, le=100),
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    reports = (
+        apply_report_filters(
+            db.query(WeatherReport),
+            event_type,
+            state,
+            verification_status,
+        )
+        .order_by(WeatherReport.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": report.id,
+            "source": report.source,
+            "description": report.description,
+            "event_type": report.event_type,
+            "city": report.city,
+            "state": report.state,
+            "latitude": report.latitude,
+            "longitude": report.longitude,
+            "verification_status": (
+                report.verification_status
+            ),
+            "confidence_score": report.confidence_score,
+            "trust_score": report.trust_score,
+            "is_duplicate": report.is_duplicate,
+            "timestamp": (
+                report.timestamp.isoformat()
+                if report.timestamp
+                else None
+            ),
+        }
+        for report in reports
+    ]
+
+
+@router.get("/map-reports")
+def map_reports(
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    reports = (
+        apply_report_filters(
+            db.query(WeatherReport),
+            event_type,
+            state,
+            verification_status,
+        )
+        .filter(WeatherReport.latitude.is_not(None))
+        .filter(WeatherReport.longitude.is_not(None))
+        .order_by(WeatherReport.timestamp.desc())
+        .limit(500)
+        .all()
+    )
+
+    return [
+        {
+            "id": report.id,
+            "event_type": report.event_type,
+            "city": report.city,
+            "state": report.state,
+            "latitude": report.latitude,
+            "longitude": report.longitude,
+            "verification_status": (
+                report.verification_status
+            ),
+            "timestamp": (
+                report.timestamp.isoformat()
+                if report.timestamp
+                else None
+            ),
+        }
+        for report in reports
+    ]
+
+
+@router.get("/event-distribution")
+def event_distribution(
+    state: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return reports_by_event(
+        state=state,
+        db=db,
+    )
+
+
+@router.get("/location-distribution")
+def location_distribution(
+    event_type: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return reports_by_state(
+        event_type=event_type,
+        db=db,
+    )

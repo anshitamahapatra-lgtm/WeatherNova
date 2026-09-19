@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
@@ -13,14 +13,33 @@ router = APIRouter(
 
 @router.get("/")
 def get_reports(
+    limit: int = Query(20, ge=1, le=100),
+    event_type: str | None = None,
+    state: str | None = None,
+    verification_status: str | None = None,
     db: Session = Depends(get_db),
 ):
-    reports = (
-        db.query(WeatherReport)
-        .order_by(
-            WeatherReport.timestamp.desc()
+    query = db.query(WeatherReport)
+
+    if event_type:
+        query = query.filter(
+            WeatherReport.event_type == event_type
         )
-        .limit(20)
+
+    if state:
+        query = query.filter(
+            WeatherReport.state == state
+        )
+
+    if verification_status:
+        query = query.filter(
+            WeatherReport.verification_status
+            == verification_status
+        )
+
+    reports = (
+        query.order_by(WeatherReport.timestamp.desc())
+        .limit(limit)
         .all()
     )
 
