@@ -4,3 +4,4 @@ sqlalchemy
 requests
 joblib
 pandas
+psycopg2-binary
