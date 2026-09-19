@@ -5,6 +5,7 @@ from app.api.reports import router as reports_router
 from app.api.analytics import router as analytics_router
 from app.api.events import router as events_router
 from app.api.weather import router as weather_router
+from app.database.init_db import init_db
 
 
 app = FastAPI(
@@ -14,15 +15,20 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",
-    "https://weathernova-4.onrender.com",
-],
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "https://weathernova-4.onrender.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
