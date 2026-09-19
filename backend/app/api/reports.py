@@ -3,15 +3,74 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import csv
 import io
+import json
 
 from app.database.connection import get_db
 from app.models.report import WeatherReport
+from app.ml.report_verification import (
+    build_media_metadata,
+    dump_json,
+    evaluate_report_signals,
+    normalize_hashtags,
+    normalize_media_urls,
+    safe_http_url,
+)
 
 
 router = APIRouter(
     prefix="/reports",
     tags=["Reports"],
 )
+
+
+def serialize_report(report: WeatherReport):
+    media_urls = normalize_media_urls(report.media_urls)
+    hashtags = normalize_hashtags(report.hashtags)
+
+    try:
+        raw_payload = json.loads(report.raw_payload or "{}")
+    except json.JSONDecodeError:
+        raw_payload = {}
+
+    verification_signals = raw_payload.get(
+        "verification_signals",
+        {},
+    )
+
+    return {
+        "id": report.id,
+        "source": report.source,
+        "description": report.description,
+        "event_type": report.event_type,
+        "city": report.city,
+        "state": report.state,
+        "latitude": report.latitude,
+        "longitude": report.longitude,
+        "verification_status": (
+            report.verification_status
+        ),
+        "confidence_score": (
+            report.confidence_score
+        ),
+        "trust_score": (
+            report.trust_score
+        ),
+        "is_duplicate": (
+            report.is_duplicate
+        ),
+        "source_url": report.source_url,
+        "media": build_media_metadata(media_urls),
+        "media_count": len(media_urls),
+        "hashtags": hashtags,
+        "verification_notes": report.verification_notes,
+        "misinformation_score": report.misinformation_score,
+        "verification_signals": verification_signals,
+        "timestamp": (
+            report.timestamp.isoformat()
+            if report.timestamp
+            else None
+        ),
+    }
 
 
 @router.get("/")
@@ -46,36 +105,7 @@ def get_reports(
         .all()
     )
 
-    return [
-        {
-            "id": report.id,
-            "source": report.source,
-            "description": report.description,
-            "event_type": report.event_type,
-            "city": report.city,
-            "state": report.state,
-            "latitude": report.latitude,
-            "longitude": report.longitude,
-            "verification_status": (
-                report.verification_status
-            ),
-            "confidence_score": (
-                report.confidence_score
-            ),
-            "trust_score": (
-                report.trust_score
-            ),
-            "is_duplicate": (
-                report.is_duplicate
-            ),
-            "timestamp": (
-                report.timestamp.isoformat()
-                if report.timestamp
-                else None
-            ),
-        }
-        for report in reports
-    ]
+    return [serialize_report(report) for report in reports]
 
 
 @router.post("/")
@@ -89,6 +119,37 @@ def create_report(
     if report.get("source") == "WeatherNova User":
         trust_score = max(trust_score, 0.45)
         confidence_score = max(confidence_score, 0.55)
+
+    media_urls = normalize_media_urls(report.get("media_urls"))
+    hashtags = normalize_hashtags(report.get("hashtags"))
+    source_url = safe_http_url(report.get("source_url"))
+    verification = evaluate_report_signals(
+        db=db,
+        source=report.get("source", "WeatherNova"),
+        description=report.get("description", ""),
+        confidence_score=confidence_score,
+        media_urls=media_urls,
+    )
+
+    trust_score = max(
+        trust_score,
+        verification["trust_score"],
+    )
+
+    confidence_score = max(
+        confidence_score,
+        float(report.get("confidence_score", confidence_score)),
+    )
+
+    raw_payload = {
+        "ingestion": report.get("raw_payload", {}),
+        "verification_signals": verification,
+        "media_storage": (
+            "external_reference_only"
+            if media_urls
+            else "not_provided"
+        ),
+    }
 
     new_report = WeatherReport(
         source=report.get(
@@ -129,19 +190,31 @@ def create_report(
             "pending",
         ),
 
-        confidence_score=report.get(
-            "confidence_score",
-            confidence_score,
-        ),
+        confidence_score=confidence_score,
 
-        trust_score=report.get(
-            "trust_score",
-            trust_score,
-        ),
+        trust_score=trust_score,
 
         is_duplicate=report.get(
             "is_duplicate",
-            False,
+            verification["is_duplicate"],
+        ),
+
+        source_url=source_url,
+
+        media_urls=dump_json(media_urls),
+
+        hashtags=dump_json(hashtags),
+
+        raw_payload=json.dumps(raw_payload, ensure_ascii=True),
+
+        verification_notes=report.get(
+            "verification_notes",
+            verification["verification_notes"],
+        ),
+
+        misinformation_score=report.get(
+            "misinformation_score",
+            verification["misinformation_score"],
         ),
     )
 
@@ -193,27 +266,39 @@ def export_reports(
             "confidence_score",
             "trust_score",
             "is_duplicate",
+            "source_url",
+            "media_count",
+            "hashtags",
+            "verification_notes",
+            "misinformation_score",
             "timestamp",
             "description",
         ]
     )
 
     for report in reports:
+        serialized = serialize_report(report)
+
         writer.writerow(
             [
-                report.id,
-                report.source,
-                report.event_type,
-                report.city,
-                report.state,
-                report.latitude,
-                report.longitude,
-                report.verification_status,
-                report.confidence_score,
-                report.trust_score,
-                report.is_duplicate,
-                report.timestamp.isoformat() if report.timestamp else "",
-                report.description,
+                serialized["id"],
+                serialized["source"],
+                serialized["event_type"],
+                serialized["city"],
+                serialized["state"],
+                serialized["latitude"],
+                serialized["longitude"],
+                serialized["verification_status"],
+                serialized["confidence_score"],
+                serialized["trust_score"],
+                serialized["is_duplicate"],
+                serialized["source_url"],
+                serialized["media_count"],
+                " ".join(serialized["hashtags"]),
+                serialized["verification_notes"],
+                serialized["misinformation_score"],
+                serialized["timestamp"] or "",
+                serialized["description"],
             ]
         )
 

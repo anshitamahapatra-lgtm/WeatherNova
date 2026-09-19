@@ -175,6 +175,8 @@ def update_report_review(
         "confidence_score",
         "trust_score",
         "is_duplicate",
+        "verification_notes",
+        "misinformation_score",
     ]:
         if field in payload:
             setattr(report, field, payload[field])

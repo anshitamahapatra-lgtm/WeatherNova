@@ -14,43 +14,103 @@ router = APIRouter(
 )
 
 
+DEFAULT_SOURCES = [
+    {
+        "name": "Open-Meteo",
+        "source_type": "weather_api",
+        "reliability_score": 0.95,
+        "is_active": True,
+        "config_url": "https://api.open-meteo.com",
+        "runtime_status": "READY",
+        "status_notes": "Existing weather API ingestion is active.",
+        "auth_required": False,
+    },
+    {
+        "name": "Citizen Reports",
+        "source_type": "crowdsourced",
+        "reliability_score": 0.62,
+        "is_active": True,
+        "config_url": None,
+        "runtime_status": "READY",
+        "status_notes": "User-submitted report metadata is accepted by WeatherNova.",
+        "auth_required": False,
+    },
+    {
+        "name": "Public Datasets",
+        "source_type": "public_dataset",
+        "reliability_score": 0.8,
+        "is_active": False,
+        "config_url": None,
+        "runtime_status": "NOT_CONFIGURED",
+        "status_notes": "Configure PUBLIC_DATASET_URLS to ingest real public datasets.",
+        "auth_required": False,
+    },
+    {
+        "name": "Social Media Hashtags",
+        "source_type": "social_media",
+        "reliability_score": 0.5,
+        "is_active": False,
+        "config_url": None,
+        "runtime_status": "NOT_CONFIGURED",
+        "status_notes": "Configure SOCIAL_MEDIA_PROVIDER and SOCIAL_MEDIA_BEARER_TOKEN for real #IMD/weather hashtag ingestion.",
+        "auth_required": True,
+    },
+    {
+        "name": "Kafka/Spark Runtime",
+        "source_type": "big_data_runtime",
+        "reliability_score": 0.75,
+        "is_active": False,
+        "config_url": None,
+        "runtime_status": "NOT_CONFIGURED",
+        "status_notes": "Configure Kafka and Spark environment variables before claiming streaming runtime readiness.",
+        "auth_required": False,
+    },
+]
+
+
+LEGACY_SOURCE_NAMES = {
+    "Social Media Stream": "Social Media Hashtags",
+}
+
+
+def ensure_default_sources(db: Session):
+    sources = db.query(Source).all()
+    by_name = {source.name: source for source in sources}
+    changed = False
+
+    for old_name, new_name in LEGACY_SOURCE_NAMES.items():
+        if old_name in by_name and new_name not in by_name:
+            by_name[old_name].name = new_name
+            by_name[new_name] = by_name.pop(old_name)
+            changed = True
+
+    for defaults in DEFAULT_SOURCES:
+        source = by_name.get(defaults["name"])
+
+        if not source:
+            source = Source(**defaults, last_checked_at=datetime.utcnow())
+            db.add(source)
+            changed = True
+            continue
+
+        for field, value in defaults.items():
+            if getattr(source, field, None) != value:
+                setattr(source, field, value)
+                changed = True
+
+        if defaults["runtime_status"] == "READY":
+            source.last_checked_at = datetime.utcnow()
+
+    if changed:
+        db.commit()
+
+
 @router.get("/")
 def get_sources(
     db: Session = Depends(get_db),
 ):
+    ensure_default_sources(db)
     sources = db.query(Source).order_by(Source.name.asc()).all()
-
-    if not sources:
-        default_sources = [
-            Source(
-                name="Open-Meteo",
-                source_type="weather_api",
-                reliability_score=0.95,
-                is_active=True,
-                last_checked_at=datetime.utcnow(),
-            ),
-            Source(
-                name="Citizen Reports",
-                source_type="crowdsourced",
-                reliability_score=0.62,
-                is_active=True,
-            ),
-            Source(
-                name="Public Datasets",
-                source_type="dataset_architecture",
-                reliability_score=0.8,
-                is_active=False,
-            ),
-            Source(
-                name="Social Media Stream",
-                source_type="stream_architecture",
-                reliability_score=0.5,
-                is_active=False,
-            ),
-        ]
-        db.add_all(default_sources)
-        db.commit()
-        sources = db.query(Source).order_by(Source.name.asc()).all()
 
     return sources
 
@@ -109,6 +169,10 @@ def update_source(
         "source_type",
         "reliability_score",
         "is_active",
+        "config_url",
+        "auth_required",
+        "runtime_status",
+        "status_notes",
     ]:
         if field in payload:
             setattr(source, field, payload[field])

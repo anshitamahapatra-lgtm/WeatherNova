@@ -32,6 +32,7 @@ const routes = [
   ["/reports", "Reports"],
   ["/analytics", "Analytics"],
   ["/alerts", "Alerts"],
+  ["/sih26069", "SIH Extensions"],
   ["/report", "Citizen Report"],
   ["/admin/login", "Admin Login"],
   ["/admin/dashboard", "Admin"],
@@ -76,6 +77,24 @@ function authHeaders() {
 
 function StatusPill({ children, tone = "info" }) {
   return <span className={`status-pill status-${tone}`}>{children}</span>;
+}
+
+function statusTone(status = "") {
+  const normalized = String(status).toUpperCase();
+
+  if (["READY", "IMPLEMENTED", "VERIFIED", "ACTIVE"].includes(normalized)) {
+    return "success";
+  }
+
+  if (["NOT_RUNNING", "REJECTED", "FAILED"].includes(normalized)) {
+    return "danger";
+  }
+
+  if (["CONFIGURED", "PENDING", "HEURISTIC_PROTOTYPE"].includes(normalized)) {
+    return "warn";
+  }
+
+  return "info";
 }
 
 function Metric({ label, value, note }) {
@@ -140,13 +159,14 @@ function useCoreData() {
   const [sources, setSources] = useState([]);
   const [alerts, setAlerts] = useState({ active_alerts: [], verified_signals: [] });
   const [pipeline, setPipeline] = useState(null);
+  const [ingestionJobs, setIngestionJobs] = useState([]);
   const [error, setError] = useState("");
 
   const reload = useCallback(async () => {
     setError("");
 
     try {
-      const [summary, reportRows, eventRows, sourceRows, alertRows, pipelineStatus] =
+      const [summary, reportRows, eventRows, sourceRows, alertRows, pipelineStatus, jobs] =
         await Promise.all([
           request("/analytics/summary"),
           request("/reports/?limit=100"),
@@ -154,6 +174,7 @@ function useCoreData() {
           request("/sources/"),
           request("/alerts/"),
           request("/big-data/pipeline"),
+          request("/big-data/ingestion-jobs"),
         ]);
 
       setAnalytics(summary);
@@ -162,6 +183,7 @@ function useCoreData() {
       setSources(sourceRows);
       setAlerts(alertRows);
       setPipeline(pipelineStatus);
+      setIngestionJobs(jobs);
     } catch (err) {
       setError(err.message || "Unable to load WeatherNova data.");
     }
@@ -171,7 +193,7 @@ function useCoreData() {
     reload();
   }, [reload]);
 
-  return { analytics, reports, events, sources, alerts, pipeline, error, reload };
+  return { analytics, reports, events, sources, alerts, pipeline, ingestionJobs, error, reload };
 }
 
 function Dashboard({ data }) {
@@ -201,7 +223,7 @@ function Dashboard({ data }) {
             {Object.entries(pipeline?.ingestion || {}).map(([name, status]) => (
               <div className="coverage-item" key={name}>
                 <span>{name.replaceAll("_", " ")}</span>
-                <StatusPill tone={status === "implemented" ? "success" : "warn"}>
+                <StatusPill tone={statusTone(status)}>
                   {status}
                 </StatusPill>
               </div>
@@ -500,11 +522,55 @@ function ReportsPage({ reports, title = "Report review queue" }) {
               render: (row) => <StatusPill>{row.verification_status}</StatusPill>,
             },
             { key: "confidence_score", label: "Confidence" },
+            { key: "trust_score", label: "Trust" },
+            { key: "misinformation_score", label: "Risk" },
+            { key: "media_count", label: "Media" },
             { key: "is_duplicate", label: "Duplicate", render: (row) => row.is_duplicate ? "Yes" : "No" },
           ]}
         />
       </section>
+      <ReportEvidence reports={filtered.slice(0, 6)} />
     </>
+  );
+}
+
+function ReportEvidence({ reports }) {
+  const rows = reports.filter((report) => (
+    report.media_count ||
+    report.source_url ||
+    report.hashtags?.length ||
+    report.verification_notes
+  ));
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="reports-section">
+      <div className="reports-header">
+        <h2>Evidence and Verification Signals</h2>
+        <p>Prototype verification labels expose the signals used; external fact-checking is not claimed.</p>
+      </div>
+      <div className="evidence-grid">
+        {rows.map((report) => (
+          <div className="evidence-item" key={report.id}>
+            <div className="evidence-title">
+              <strong>{report.event_type}</strong>
+              <StatusPill tone={statusTone(report.verification_status)}>{report.verification_status}</StatusPill>
+            </div>
+            <p>{report.verification_notes || "No verification notes recorded."}</p>
+            <div className="evidence-meta">
+              <span>Trust {Math.round((report.trust_score || 0) * 100)}%</span>
+              <span>Misleading risk {Math.round((report.misinformation_score || 0) * 100)}%</span>
+              <span>Media {report.media_count || 0}</span>
+            </div>
+            {report.source_url && <a href={report.source_url} target="_blank" rel="noreferrer">Source reference</a>}
+            {report.hashtags?.length > 0 && <div className="tag-list">{report.hashtags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -613,7 +679,17 @@ function AlertsPage({ alerts }) {
 }
 
 function CitizenReport({ reload }) {
-  const [form, setForm] = useState({ city: "", state: "", event_type: "Rain", description: "", latitude: "", longitude: "" });
+  const [form, setForm] = useState({
+    city: "",
+    state: "",
+    event_type: "Rain",
+    description: "",
+    latitude: "",
+    longitude: "",
+    source_url: "",
+    media_urls: "",
+    hashtags: "",
+  });
   const [message, setMessage] = useState("");
 
   async function submit(event) {
@@ -630,10 +706,12 @@ function CitizenReport({ reload }) {
           longitude: form.longitude ? Number(form.longitude) : null,
           source: "WeatherNova User",
           verification_status: "pending",
+          media_urls: form.media_urls.split(",").map((item) => item.trim()).filter(Boolean),
+          hashtags: form.hashtags.split(",").map((item) => item.trim()).filter(Boolean),
         }),
       });
       setMessage("Report submitted for verification.");
-      setForm((old) => ({ ...old, description: "" }));
+      setForm((old) => ({ ...old, description: "", media_urls: "", source_url: "", hashtags: "" }));
       await reload();
     } catch (err) {
       setMessage(err.message || "Unable to submit report.");
@@ -648,16 +726,114 @@ function CitizenReport({ reload }) {
         description="Capture metadata required for verification: time, city, state, GPS, source, category, and observation text."
       />
       <form className="form-panel" onSubmit={submit}>
-        {["city", "state", "latitude", "longitude"].map((field) => (
+        {["city", "state", "latitude", "longitude", "source_url"].map((field) => (
           <input key={field} value={form[field]} placeholder={field.replace("_", " ")} onChange={(event) => setForm((old) => ({ ...old, [field]: event.target.value }))} />
         ))}
         <select value={form.event_type} onChange={(event) => setForm((old) => ({ ...old, event_type: event.target.value }))}>
           {["Rain", "Thunderstorm", "Snow", "Fog", "Wind", "Extreme Weather", "Clear/Cloudy", "Other"].map((item) => <option key={item}>{item}</option>)}
         </select>
-        <textarea value={form.description} placeholder="Observation, impact, photos/videos link, or source notes" onChange={(event) => setForm((old) => ({ ...old, description: event.target.value }))} />
+        <input value={form.media_urls} placeholder="Photo/video URLs, comma separated" onChange={(event) => setForm((old) => ({ ...old, media_urls: event.target.value }))} />
+        <input value={form.hashtags} placeholder="Hashtags, comma separated" onChange={(event) => setForm((old) => ({ ...old, hashtags: event.target.value }))} />
+        <textarea value={form.description} placeholder="Observation, impact, and source notes" onChange={(event) => setForm((old) => ({ ...old, description: event.target.value }))} />
         <button className="search-button">Submit Report</button>
         {message && <div className="error-message">{message}</div>}
       </form>
+    </>
+  );
+}
+
+function SIHExtensionsPage({ data }) {
+  const { pipeline, ingestionJobs, sources } = data;
+  const streamingRows = [
+    pipeline?.streaming?.kafka,
+    pipeline?.streaming?.spark,
+  ].filter(Boolean);
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="SIH26069 Extensions"
+        title="Ingestion, verification, and big-data readiness"
+        description="Configuration-driven surfaces for real external connectors. Unconfigured systems are clearly marked and no live data is fabricated."
+      />
+      <div className="analytics-cards">
+        <Metric label="Weather API" value={pipeline?.ingestion?.weather_api || "READY"} note="Open-Meteo remains active" />
+        <Metric label="Social" value={pipeline?.ingestion?.social_media || "NOT_CONFIGURED"} note="#IMD and weather hashtag connector" />
+        <Metric label="Public Sources" value={pipeline?.ingestion?.public_apis || "NOT_CONFIGURED"} note="Datasets, websites, APIs" />
+        <Metric label="Verification" value={pipeline?.analytics?.verification_signals || "HEURISTIC"} note="Transparent prototype signals" />
+      </div>
+      <section className="dashboard-grid">
+        <div className="reports-section">
+          <div className="reports-header">
+            <h2>Connector Configuration</h2>
+            <p>Credentials and source URLs control whether connectors become live.</p>
+          </div>
+          <div className="coverage-grid">
+            {(pipeline?.connectors || []).map((connector) => (
+              <div className="coverage-item stacked" key={connector.name}>
+                <div>
+                  <strong>{connector.name}</strong>
+                  <span>{connector.detail}</span>
+                </div>
+                <StatusPill tone={statusTone(connector.state)}>{connector.state}</StatusPill>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="reports-section">
+          <div className="reports-header">
+            <h2>Kafka / Spark Runtime</h2>
+            <p>Runtime checks do not mark services ready unless endpoints are configured and reachable.</p>
+          </div>
+          <div className="coverage-grid">
+            {streamingRows.map((runtime) => (
+              <div className="coverage-item stacked" key={runtime.name}>
+                <div>
+                  <strong>{runtime.name}</strong>
+                  <span>{runtime.detail}</span>
+                </div>
+                <StatusPill tone={statusTone(runtime.state)}>{runtime.state}</StatusPill>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+      <section className="reports-section">
+        <div className="reports-header">
+          <h2>Source Registry</h2>
+          <p>Operational status and configuration metadata for source classes.</p>
+        </div>
+        <DataTable
+          rows={sources}
+          columns={[
+            { key: "name", label: "Source" },
+            { key: "source_type", label: "Type" },
+            { key: "runtime_status", label: "Runtime", render: (row) => <StatusPill tone={statusTone(row.runtime_status)}>{row.runtime_status || "NOT_CONFIGURED"}</StatusPill> },
+            { key: "auth_required", label: "Auth", render: (row) => row.auth_required ? "Required" : "No" },
+            { key: "status_notes", label: "Notes" },
+          ]}
+        />
+      </section>
+      <section className="reports-section">
+        <div className="reports-header">
+          <h2>Ingestion Jobs</h2>
+          <p>Registered and executed ingestion jobs. Registration alone does not imply data was fetched.</p>
+        </div>
+        <DataTable
+          rows={ingestionJobs}
+          empty="No ingestion jobs registered yet."
+          columns={[
+            { key: "source_name", label: "Source" },
+            { key: "source_type", label: "Type" },
+            { key: "connector_status", label: "Connector", render: (row) => <StatusPill tone={statusTone(row.connector_status)}>{row.connector_status}</StatusPill> },
+            { key: "status", label: "Job" },
+            { key: "records_seen", label: "Seen" },
+            { key: "records_created", label: "Created" },
+            { key: "notes", label: "Notes" },
+          ]}
+        />
+      </section>
+      {pipeline?.production_scale_note && <div className="notice-panel">{pipeline.production_scale_note}</div>}
     </>
   );
 }
@@ -812,7 +988,9 @@ function AdminPages({ path, data }) {
             { key: "name", label: "Source" },
             { key: "source_type", label: "Type" },
             { key: "reliability_score", label: "Reliability", render: (row) => `${Math.round(row.reliability_score * 100)}%` },
+            { key: "runtime_status", label: "Runtime", render: (row) => <StatusPill tone={statusTone(row.runtime_status)}>{row.runtime_status || "NOT_CONFIGURED"}</StatusPill> },
             { key: "is_active", label: "Active", render: (row) => row.is_active ? "Yes" : "No" },
+            { key: "status_notes", label: "Notes" },
           ]} />
         </section>
       </>
@@ -827,9 +1005,9 @@ function AdminPages({ path, data }) {
         <section className="reports-section">
           {data.reports.map((report) => (
             <div className="admin-action-row" key={report.id}>
-              <span>{report.event_type} in {report.city} from {report.source}</span>
+              <span>{report.event_type} in {report.city} from {report.source} · risk {Math.round((report.misinformation_score || 0) * 100)}% · media {report.media_count || 0}</span>
               <button onClick={() => updateReport(report, { verification_status: "verified", trust_score: 0.9, confidence_score: 0.9 })}>Verify</button>
-              <button onClick={() => updateReport(report, { verification_status: "rejected", trust_score: 0.1 })}>Reject</button>
+              <button onClick={() => updateReport(report, { verification_status: "rejected", trust_score: 0.1, misinformation_score: 0.9 })}>Reject</button>
               <button onClick={() => updateReport(report, { is_duplicate: true })}>Duplicate</button>
             </div>
           ))}
@@ -869,6 +1047,7 @@ function App() {
     if (path === "/reports") return <ReportsPage reports={data.reports} />;
     if (path === "/analytics") return <AnalyticsPage analytics={data.analytics} />;
     if (path === "/alerts") return <AlertsPage alerts={data.alerts} />;
+    if (path === "/sih26069") return <SIHExtensionsPage data={data} />;
     if (path === "/report") return <CitizenReport reload={data.reload} />;
     if (path === "/admin/login") return <AdminLogin />;
     if (path.startsWith("/admin")) return <AdminPages path={path} data={data} />;

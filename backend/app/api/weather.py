@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import requests
+import json
 
 from app.database.connection import get_db
 from app.models.report import WeatherReport
@@ -804,6 +805,28 @@ def get_weather(
         confidence_score=1.0,
         trust_score=1.0,
         is_duplicate=is_duplicate,
+        source_url=weather_url,
+        media_urls="[]",
+        hashtags="[]",
+        raw_payload=json.dumps(
+            {
+                "provider": "Open-Meteo",
+                "geocoding_url": geocoding_url,
+                "weather_url": weather_url,
+                "verification_signals": {
+                    "source_reliability": 0.95,
+                    "duplicate_similarity": 1.0 if is_duplicate else 0.0,
+                    "verification_model": "trusted_api_observation",
+                    "external_fact_check": False,
+                },
+            },
+            ensure_ascii=True,
+        ),
+        verification_notes=(
+            "Verified as a direct Open-Meteo API observation. "
+            "No social-media or external fact-check source was used."
+        ),
+        misinformation_score=0.0,
     )
 
     db.add(new_report)

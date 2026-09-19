@@ -65,6 +65,42 @@ class WeatherReport(Base):
         default=False,
     )
 
+    external_id: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+        index=True,
+    )
+
+    source_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    media_urls: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+    )
+
+    hashtags: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+    )
+
+    raw_payload: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+    )
+
+    verification_notes: Mapped[str] = mapped_column(
+        Text,
+        default="",
+    )
+
+    misinformation_score: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+    )
+
     timestamp: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,

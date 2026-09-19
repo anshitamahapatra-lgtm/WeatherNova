@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -34,6 +34,26 @@ class Source(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
+    )
+
+    config_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    auth_required: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+
+    runtime_status: Mapped[str] = mapped_column(
+        String(50),
+        default="NOT_CONFIGURED",
+    )
+
+    status_notes: Mapped[str] = mapped_column(
+        Text,
+        default="",
     )
 
     last_checked_at: Mapped[datetime | None] = mapped_column(
